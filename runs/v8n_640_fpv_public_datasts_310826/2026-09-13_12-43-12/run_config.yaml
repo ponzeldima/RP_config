@@ -1,0 +1,19 @@
+model: v8n_640_fpv_public_datasts_310826
+list_models: false
+backend: openvino
+source: videos/fpv_10_1.mp4
+duration: 30
+warmup: 10
+max_frames: null
+confidence: 0.25
+torch_threads: 1
+camera_size:
+- 1280
+- 720
+camera_fps: 16
+loop_source: true
+record: false
+record_fps: 16
+stream: false
+stream_host: 0.0.0.0
+stream_port: 5000

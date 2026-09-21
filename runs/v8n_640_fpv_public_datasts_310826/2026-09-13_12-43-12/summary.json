@@ -1,0 +1,31 @@
+{
+  "model": "v8n_640_fpv_public_datasts_310826",
+  "backend": "openvino",
+  "measurement_seconds": 30.073,
+  "frames": 291,
+  "end_to_end_fps": 9.677,
+  "frames_with_detections_percent": 90.03,
+  "inference_latency_ms": {
+    "mean": 101.145,
+    "p50": 100.993,
+    "p95": 102.464
+  },
+  "per_class": {
+    "fpv": {
+      "detections": 266,
+      "frames_seen": 262,
+      "frames_seen_percent": 90.03,
+      "mean_confidence": 0.6481,
+      "max_confidence": 0.8569
+    },
+    "bird": {
+      "detections": 0,
+      "frames_seen": 0,
+      "frames_seen_percent": 0.0,
+      "mean_confidence": null,
+      "max_confidence": null
+    }
+  },
+  "system_samples": 30,
+  "accuracy_note": "Ground-truth annotations are required for mAP, precision, and recall."
+}

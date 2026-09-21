@@ -1,0 +1,2 @@
+2026-09-13 12:43:12,510 INFO Model: v8n_640_fpv_public_datasts_310826 | backend: openvino | output: /home/ponzel/Desktop/p/runs/v8n_640_fpv_public_datasts_310826/2026-09-13_12-43-12
+2026-09-13 12:43:53,562 INFO Done: 9.68 FPS across 291 frames
