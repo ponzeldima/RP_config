@@ -29,10 +29,18 @@ runs/custom_yolov8n_fpv/2026-09-09_12-00-00/
 
 Install the runtime needed by the selected backend on the Raspberry Pi:
 
+install venv
+
+```bash
+python -m venv .venv --system-site-packages
+```
+
 ```bash
 python3 -m pip install psutil pyyaml opencv-python ultralytics onnxruntime openvino flask
 sudo apt install imx500-all imx500-tools
 python3 -m pip install modlib
+# Hailo AI HAT+ (install HailoRT/hailo_platform from Hailo's Raspberry Pi deb packages)
+sudo apt install hailo-all
 ```
 
 Examples:
@@ -42,16 +50,19 @@ Examples:
 python3 benchmark.py --list-models
 
 # ONNX inference on the Raspberry Pi with the IMX500 used as a regular camera.
-python3 benchmark.py custom_yolov8n_fpv --backend onnx --source camera --record --stream
+python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend onnx --source camera --record --stream
 
 # Original PT model on the Raspberry Pi, no browser stream or recording.
-python3 benchmark.py custom_yolov8n_fpv --backend pt --source camera
+python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend pt --source camera
 
 # OpenVINO XML/BIN inference on the Raspberry Pi.
 python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend openvino --source camera
 
 # AI inference on the IMX500 camera.
 python3 benchmark.py custom_yolov8n_fpv --backend imx --source camera --record --stream
+
+# AI inference on a Hailo-8 AI HAT+.
+python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source camera
 
 # Loop an input video for 60 seconds.
 python3 benchmark.py custom_yolov8n_fpv --backend onnx --source test.mp4
@@ -65,5 +76,7 @@ with `--torch-threads 2` or `--torch-threads 4` and keep the value in each run's
 `summary.json` reports end-to-end FPS, inference-latency percentiles, confidence and
 the percentage of measured frames in which each class was detected. `system.csv`
 records CPU, RAM, CPU frequency, temperature, and Raspberry Pi throttling flags once
-per second. mAP, precision, and recall require a ground-truth dataset and are not
-estimated from a live camera stream.
+per second, plus `inference_busy_percent`: the share of that second spent inside the
+backend's `detect()` call, which approximates accelerator load (Hailo AI HAT+, IMX500,
+CPU/GPU, etc.) since these devices expose no direct utilization counter. mAP, precision,
+and recall require a ground-truth dataset and are not estimated from a live camera stream.

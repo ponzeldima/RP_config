@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -104,12 +105,14 @@ class SystemMonitor:
         self.interval_s = interval_s
         self.last_sample = 0.0
         self.samples = 0
+        self.busy_ms = 0.0
         self.file = output_path.open("w", newline="", encoding="utf-8")
         self.writer = csv.DictWriter(
             self.file,
             fieldnames=[
                 "timestamp_s", "cpu_percent", "ram_percent", "ram_used_mb",
                 "cpu_frequency_mhz", "temperature_c", "throttled_hex", "throttled_flags",
+                "inference_busy_percent",
             ],
         )
         self.writer.writeheader()
@@ -138,13 +141,19 @@ class SystemMonitor:
         except (FileNotFoundError, subprocess.CalledProcessError):
             return "unavailable", ""
 
+    def record_inference_time(self, latency_ms: float) -> None:
+        self.busy_ms += latency_ms
+
     def sample_if_due(self, elapsed_s: float) -> None:
         if elapsed_s - self.last_sample < self.interval_s:
             return
+        interval_elapsed_s = elapsed_s - self.last_sample
         self.last_sample = elapsed_s
         memory = psutil.virtual_memory()
         frequency = psutil.cpu_freq()
         throttled_hex, throttled_flags = self.throttling()
+        busy_percent = min(100.0, 100 * self.busy_ms / (interval_elapsed_s * 1000)) if interval_elapsed_s else 0.0
+        self.busy_ms = 0.0
         self.writer.writerow({
             "timestamp_s": f"{elapsed_s:.3f}",
             "cpu_percent": f"{psutil.cpu_percent(None):.1f}",
@@ -154,6 +163,7 @@ class SystemMonitor:
             "temperature_c": f"{self.temperature_c():.1f}" if self.temperature_c() is not None else "",
             "throttled_hex": throttled_hex,
             "throttled_flags": throttled_flags,
+            "inference_busy_percent": f"{busy_percent:.1f}",
         })
         self.file.flush()
         self.samples += 1
@@ -322,6 +332,9 @@ class HostBackend:
     def detect(self, frame: np.ndarray) -> list[Detection]:
         raise NotImplementedError
 
+    def close(self) -> None:
+        pass
+
 
 class PtBackend(HostBackend):
     def __init__(
@@ -479,6 +492,74 @@ class OpenVinoBackend(HostBackend):
         return [Detection(*mapped[int(index)]) for index in np.asarray(indices).reshape(-1)] if len(indices) else []
 
 
+class HailoBackend(HostBackend):
+    """Runs .hef models compiled with baked-in NMS on a Hailo-8 AI HAT+ via HailoRT."""
+
+    def __init__(self, model_path: Path, model: ModelSpec, confidence: float):
+        try:
+            from hailo_platform import (
+                HEF, ConfigureParams, FormatType, HailoStreamInterface,
+                InferVStreams, InputVStreamParams, OutputVStreamParams, VDevice,
+            )
+        except ImportError as error:
+            raise RuntimeError(
+                "Hailo backend requires the HailoRT Python API (hailo_platform)"
+            ) from error
+
+        self.hef = HEF(str(model_path))
+        self.exit_stack = ExitStack()
+        self.target = self.exit_stack.enter_context(VDevice())
+        configure_params = ConfigureParams.create_from_hef(hef=self.hef, interface=HailoStreamInterface.PCIe)
+        self.network_group = self.target.configure(self.hef, configure_params)[0]
+        network_group_params = self.network_group.create_params()
+        self.input_vstream_info = self.hef.get_input_vstream_infos()[0]
+        # The compiled HEF expects raw uint8 pixels; it already bakes in its own normalization.
+        input_vstreams_params = InputVStreamParams.make(
+            self.network_group, quantized=True, format_type=FormatType.UINT8
+        )
+        output_vstreams_params = OutputVStreamParams.make(
+            self.network_group, quantized=False, format_type=FormatType.FLOAT32
+        )
+        self.infer_pipeline = self.exit_stack.enter_context(
+            InferVStreams(self.network_group, input_vstreams_params, output_vstreams_params)
+        )
+        self.exit_stack.enter_context(self.network_group.activate(network_group_params))
+        self.width, self.height = model.input_size
+        self.confidence = confidence
+
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        image_height, image_width = frame.shape[:2]
+        scale = min(self.width / image_width, self.height / image_height)
+        resized_width = round(image_width * scale)
+        resized_height = round(image_height * scale)
+        pad_x = (self.width - resized_width) // 2
+        pad_y = (self.height - resized_height) // 2
+        resized = cv2.resize(frame, (resized_width, resized_height))
+        letterboxed = np.full((self.height, self.width, 3), 114, dtype=np.uint8)
+        letterboxed[pad_y:pad_y + resized_height, pad_x:pad_x + resized_width] = resized
+        rgb = cv2.cvtColor(letterboxed, cv2.COLOR_BGR2RGB)
+        input_data = {self.input_vstream_info.name: np.expand_dims(rgb, axis=0)}
+        outputs = self.infer_pipeline.infer(input_data)
+
+        # Baked-in NMS output: one array per class, rows are [y1, x1, y2, x2, score] normalized to 0-1.
+        per_class_boxes = next(iter(outputs.values()))[0]
+        detections = []
+        for class_id, boxes in enumerate(per_class_boxes):
+            for row in np.asarray(boxes).reshape(-1, 5):
+                y1, x1, y2, x2, score = row
+                if score < self.confidence:
+                    continue
+                detections.append(Detection(
+                    class_id, float(score),
+                    (x1 * self.width - pad_x) / scale, (y1 * self.height - pad_y) / scale,
+                    (x2 * self.width - pad_x) / scale, (y2 * self.height - pad_y) / scale,
+                ))
+        return detections
+
+    def close(self) -> None:
+        self.exit_stack.close()
+
+
 class FrameSource:
     def frames(self) -> Iterable[np.ndarray]:
         raise NotImplementedError
@@ -488,13 +569,19 @@ class FrameSource:
 
 
 class CameraSource(FrameSource):
-    def __init__(self, size: tuple[int, int]):
+    def __init__(self, size: tuple[int, int], fps: float):
         try:
             from picamera2 import Picamera2
         except ImportError as error:
             raise RuntimeError("Camera source requires Picamera2") from error
         self.camera = Picamera2()
-        config = self.camera.create_video_configuration(main={"size": size, "format": "RGB888"})
+        # Without an explicit FrameDurationLimits control, Picamera2 falls back to the
+        # sensor mode's default duration, which is often capped around 30 fps.
+        frame_duration_us = int(1_000_000 / fps)
+        config = self.camera.create_video_configuration(
+            main={"size": size, "format": "RGB888"},
+            controls={"FrameDurationLimits": (frame_duration_us, frame_duration_us)},
+        )
         self.camera.configure(config)
         self.camera.start()
 
@@ -584,9 +671,9 @@ def setup_logging(output_dir: Path) -> logging.Logger:
     return logger
 
 
-def build_source(source_value: str, size: tuple[int, int], loop: bool) -> FrameSource:
+def build_source(source_value: str, size: tuple[int, int], loop: bool, fps: float) -> FrameSource:
     if source_value == "camera":
-        return CameraSource(size)
+        return CameraSource(size, fps)
     path = Path(source_value).expanduser()
     if path.is_dir():
         return ImageDirectorySource(path, loop)
@@ -604,12 +691,14 @@ def build_host_backend(
         return OnnxBackend(model.artifact("onnx"), model, confidence)
     if backend == "openvino":
         return OpenVinoBackend(model.artifact("openvino"), model, confidence)
+    if backend == "hailo":
+        return HailoBackend(model.artifact("hailo"), model, confidence)
     raise ValueError(f"Unsupported host backend: {backend}")
 
 
 def run_host_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: Path, logger: logging.Logger) -> dict:
     backend = build_host_backend(args.backend, model, args.confidence, args.torch_threads)
-    source = build_source(args.source, args.camera_size, args.loop_source)
+    source = build_source(args.source, args.camera_size, args.loop_source, args.camera_fps)
     monitor = SystemMonitor(output_dir / "system.csv")
     run_logger = RunLogger(output_dir, model, args.backend)
     recorder = VideoRecorder(output_dir / "recording.mp4" if args.record else None, args.record_fps)
@@ -634,6 +723,7 @@ def run_host_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: P
             latency_ms = (time.monotonic() - inference_started) * 1000
             elapsed_s = time.monotonic() - started_at
             run_logger.add_frame(elapsed_s, latency_ms, detections)
+            monitor.record_inference_time(latency_ms)
             monitor.sample_if_due(elapsed_s)
             annotated = annotate(frame, detections, model, run_logger.frames / elapsed_s if elapsed_s else 0)
             recorder.write(annotated)
@@ -647,6 +737,7 @@ def run_host_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: P
         recorder.close()
         monitor.close()
         run_logger.close()
+        backend.close()
         if stream:
             stream.close()
 
@@ -716,6 +807,7 @@ def run_imx_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: Pa
                     labels.append(f"#{track_id} {model.classes[int(class_id)]}: {score:.2f}")
                 elapsed_s = time.monotonic() - started_at
                 run_logger.add_frame(elapsed_s, latency_ms, detections)
+                monitor.record_inference_time(latency_ms)
                 monitor.sample_if_due(elapsed_s)
                 annotator.annotate_boxes(frame, tracked, labels=labels)
                 annotated = frame.image
@@ -745,7 +837,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", nargs="?", help="Folder name below models/")
     parser.add_argument("--list-models", action="store_true", help="List model folders with model.yaml")
-    parser.add_argument("--backend", choices=("pt", "onnx", "openvino", "imx"))
+    parser.add_argument("--backend", choices=("pt", "onnx", "openvino", "imx", "hailo"))
     parser.add_argument("--source", default="camera", help="camera, video path, or image directory")
     parser.add_argument("--duration", type=float, default=30, help="Measurement duration in seconds")
     parser.add_argument("--warmup", type=float, default=10, help="Warmup duration in seconds")
@@ -756,7 +848,7 @@ def parse_args() -> argparse.Namespace:
         help="PyTorch CPU threads for the PT backend; 1 is fastest for the included YOLOv8n test",
     )
     parser.add_argument("--camera-size", type=parse_size, default=(1280, 720))
-    parser.add_argument("--camera-fps", type=int, default=16)
+    parser.add_argument("--camera-fps", type=int, default=60, help="Requested capture rate for --source camera")
     parser.add_argument("--no-loop-source", action="store_false", dest="loop_source", help="Do not repeat file sources")
     parser.set_defaults(loop_source=True)
     parser.add_argument("--record", action="store_true", help="Write annotated recording.mp4")

@@ -12,3 +12,4 @@ artifacts:
   openvino: 23/best.xml
   imx: imx/packerOut.zip
   imx_labels: imx/labels.txt
+  hailo: 26/best.hef
