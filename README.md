@@ -37,7 +37,7 @@ python -m venv .venv --system-site-packages
 
 ```bash
 python3 -m pip install psutil pyyaml opencv-python ultralytics onnxruntime openvino flask
-sudo apt install imx500-all imx500-tools
+sudo apt install imx500-all imx500-tools ffmpeg
 python3 -m pip install modlib
 # Hailo AI HAT+ (install HailoRT/hailo_platform from Hailo's Raspberry Pi deb packages)
 sudo apt install hailo-all
@@ -67,6 +67,28 @@ python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source 
 # Loop an input video for 60 seconds.
 python3 benchmark.py custom_yolov8n_fpv --backend onnx --source test.mp4
 ```
+
+Use `--source ir-camera` to benchmark the USB IR camera (defaults to `/dev/video8`, 640x512 YUYV).
+Override the device path with `--ir-camera-device`, for example `--ir-camera-device /dev/video9`.
+
+## Standalone camera recorder
+
+Start an unlimited camera recording with a live browser preview and recording status:
+
+```bash
+python3 camera_recorder.py
+```
+
+Open `http://<raspberry-pi-ip>:5001/` from a browser on the same network. Recording starts
+automatically and is saved as a timestamped MP4 in `videos/`. Use the page's controls to
+stop or restart recording while keeping the preview open, or press Ctrl+C to stop the
+script and camera. Start with recording off using `--start-stopped`; set `--output-dir`,
+`--camera-size`, `--camera-fps`, or `--port` to customize the defaults.
+
+The recorder writes the full-resolution camera stream through Picamera2's H.264 encoder;
+the browser preview uses a separate scaled stream so JPEG preview encoding does not set
+the saved video's frame rate. The requested rate is capped at the selected camera sensor
+mode's maximum. FFmpeg is required to mux the H.264 stream into MP4.
 
 For the included YOLOv8n PT model, a single PyTorch CPU thread measured faster
 than 2 or 4 threads on Raspberry Pi 5. It is the default; compare alternatives

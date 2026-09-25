@@ -587,11 +587,33 @@ class CameraSource(FrameSource):
 
     def frames(self) -> Iterable[np.ndarray]:
         while True:
-            yield cv2.cvtColor(self.camera.capture_array(), cv2.COLOR_RGB2BGR)
+            yield self.camera.capture_array()
 
     def close(self) -> None:
         self.camera.stop()
         self.camera.close()
+
+
+class IrCameraSource(FrameSource):
+    def __init__(self, device: str, fps: float):
+        self.capture = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        if not self.capture.isOpened():
+            self.capture.release()
+            raise RuntimeError(f"Cannot open IR camera: {device}")
+        self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUYV"))
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 512)
+        self.capture.set(cv2.CAP_PROP_FPS, fps)
+
+    def frames(self) -> Iterable[np.ndarray]:
+        while True:
+            ok, frame = self.capture.read()
+            if not ok:
+                raise RuntimeError("Failed to read a frame from the IR camera")
+            yield frame
+
+    def close(self) -> None:
+        self.capture.release()
 
 
 class VideoSource(FrameSource):
@@ -671,15 +693,19 @@ def setup_logging(output_dir: Path) -> logging.Logger:
     return logger
 
 
-def build_source(source_value: str, size: tuple[int, int], loop: bool, fps: float) -> FrameSource:
+def build_source(
+    source_value: str, size: tuple[int, int], loop: bool, fps: float, ir_camera_device: str = "/dev/video8"
+) -> FrameSource:
     if source_value == "camera":
         return CameraSource(size, fps)
+    if source_value == "ir-camera":
+        return IrCameraSource(ir_camera_device, fps)
     path = Path(source_value).expanduser()
     if path.is_dir():
         return ImageDirectorySource(path, loop)
     if path.is_file():
         return VideoSource(path, loop)
-    raise ValueError("--source must be 'camera', a video file, or an image directory")
+    raise ValueError("--source must be 'camera', 'ir-camera', a video file, or an image directory")
 
 
 def build_host_backend(
@@ -698,7 +724,9 @@ def build_host_backend(
 
 def run_host_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: Path, logger: logging.Logger) -> dict:
     backend = build_host_backend(args.backend, model, args.confidence, args.torch_threads)
-    source = build_source(args.source, args.camera_size, args.loop_source, args.camera_fps)
+    source = build_source(
+        args.source, args.camera_size, args.loop_source, args.camera_fps, args.ir_camera_device
+    )
     monitor = SystemMonitor(output_dir / "system.csv")
     run_logger = RunLogger(output_dir, model, args.backend)
     recorder = VideoRecorder(output_dir / "recording.mp4" if args.record else None, args.record_fps)
@@ -838,7 +866,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("model", nargs="?", help="Folder name below models/")
     parser.add_argument("--list-models", action="store_true", help="List model folders with model.yaml")
     parser.add_argument("--backend", choices=("pt", "onnx", "openvino", "imx", "hailo"))
-    parser.add_argument("--source", default="camera", help="camera, video path, or image directory")
+    parser.add_argument("--source", default="camera", help="camera, ir-camera, video path, or image directory")
     parser.add_argument("--duration", type=float, default=30, help="Measurement duration in seconds")
     parser.add_argument("--warmup", type=float, default=10, help="Warmup duration in seconds")
     parser.add_argument("--max-frames", type=int, help="Optional measurement frame limit")
@@ -847,8 +875,9 @@ def parse_args() -> argparse.Namespace:
         "--torch-threads", type=int, default=1,
         help="PyTorch CPU threads for the PT backend; 1 is fastest for the included YOLOv8n test",
     )
-    parser.add_argument("--camera-size", type=parse_size, default=(1280, 720))
-    parser.add_argument("--camera-fps", type=int, default=60, help="Requested capture rate for --source camera")
+    parser.add_argument("--camera-size", type=parse_size, default=(2000, 1500))
+    parser.add_argument("--camera-fps", type=int, default=60, help="Requested capture rate for camera sources")
+    parser.add_argument("--ir-camera-device", default="/dev/video8", help="V4L2 device path for --source ir-camera")
     parser.add_argument("--no-loop-source", action="store_false", dest="loop_source", help="Do not repeat file sources")
     parser.set_defaults(loop_source=True)
     parser.add_argument("--record", action="store_true", help="Write annotated recording.mp4")

@@ -1,0 +1,27 @@
+test on AI camera
+
+model 1
+640x640 yolo v8n
+python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source camera --stream --record
+
+
+test model 2
+640x640 yolo v8n with public data
+
+---------------------------------
+
+test on IR camera
+
+model 1
+640x640 yolo v8n
+python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source ai-camera --stream --record
+
+
+----------------------------------
+
+record on RPi AI Camera
+rpicam-vid --timeout 0 --width 2028 --height 1520 --framerate 30 --codec libav --libav-format mp4 --output "$HOME/Videos/camera_$(date +%Y%m%d_%H%M%S).mp4"
+ 
+
+ record on IR camera
+ ffmpeg -f v4l2 -input_format yuyv422 -framerate 30 -video_size 640x512 -i /dev/video8 -map 0:v:0 -c:v libx264 -preset veryfast -pix_fmt yuv420p -f tee "[f=mp4]$HOME/Videos/ir_camera_$(date +%Y%m%d_%H%M%S).mp4|[f=nut]pipe:1" | ffplay -fflags nobuffer -flags low_delay -f nut -
