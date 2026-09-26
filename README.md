@@ -102,3 +102,8 @@ per second, plus `inference_busy_percent`: the share of that second spent inside
 backend's `detect()` call, which approximates accelerator load (Hailo AI HAT+, IMX500,
 CPU/GPU, etc.) since these devices expose no direct utilization counter. mAP, precision,
 and recall require a ground-truth dataset and are not estimated from a live camera stream.
+
+Benchmark recording and MJPEG publishing run asynchronously so output encoding does
+not block inference. Recording is sampled at `--record-fps` (16 FPS by default) to
+keep playback duration close to real time. If an output sink still falls behind, the
+benchmark logs how many output frames it dropped; inference continues at its own rate.

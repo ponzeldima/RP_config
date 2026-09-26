@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import logging
+import queue
 import re
 import subprocess
 import sys
@@ -275,6 +276,70 @@ class VideoRecorder:
     def close(self) -> None:
         if self.writer is not None:
             self.writer.release()
+
+
+class AsyncFrameSink:
+    def __init__(
+        self,
+        callback,
+        name: str,
+        logger: logging.Logger,
+        latest_only: bool = False,
+        max_pending_frames: int = 2,
+        max_fps: Optional[float] = None,
+    ):
+        self.callback = callback
+        self.name = name
+        self.logger = logger
+        self.latest_only = latest_only
+        self.frame_interval_s = 1 / max_fps if max_fps and max_fps > 0 else None
+        self.last_submitted_at: Optional[float] = None
+        self.frames: queue.Queue[Optional[np.ndarray]] = queue.Queue(max_pending_frames)
+        self.dropped_frames = 0
+        self.thread = threading.Thread(target=self._run, name=f"{name}-worker", daemon=True)
+        self.thread.start()
+
+    def submit(self, frame: np.ndarray) -> None:
+        now = time.monotonic()
+        if self.frame_interval_s is not None:
+            if self.last_submitted_at is not None and now - self.last_submitted_at < self.frame_interval_s:
+                return
+            self.last_submitted_at = now
+        try:
+            self.frames.put_nowait(frame)
+            return
+        except queue.Full:
+            if not self.latest_only:
+                self.dropped_frames += 1
+                return
+        try:
+            self.frames.get_nowait()
+            self.frames.task_done()
+            self.dropped_frames += 1
+        except queue.Empty:
+            pass
+        try:
+            self.frames.put_nowait(frame)
+        except queue.Full:
+            self.dropped_frames += 1
+
+    def _run(self) -> None:
+        while True:
+            frame = self.frames.get()
+            try:
+                if frame is None:
+                    return
+                self.callback(frame)
+            except Exception:
+                self.logger.exception("Background %s output failed", self.name)
+            finally:
+                self.frames.task_done()
+
+    def close(self) -> None:
+        self.frames.put(None)
+        self.thread.join()
+        if self.dropped_frames:
+            self.logger.warning("%s output dropped %s frames", self.name, self.dropped_frames)
 
 
 class MjpegServer:
@@ -730,13 +795,19 @@ def run_host_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: P
     monitor = SystemMonitor(output_dir / "system.csv")
     run_logger = RunLogger(output_dir, model, args.backend)
     recorder = VideoRecorder(output_dir / "recording.mp4" if args.record else None, args.record_fps)
+    recorder_sink = (
+        AsyncFrameSink(recorder.write, "recording", logger, max_fps=args.record_fps)
+        if args.record else None
+    )
     stream = MjpegServer(args.stream_host, args.stream_port) if args.stream else None
-    if stream:
-        stream.start()
-        logger.info("Browser stream: http://%s:%s", args.stream_host, args.stream_port)
+    stream_sink = None
 
     frame_iterator = iter(source.frames())
     try:
+        if stream:
+            stream.start()
+            logger.info("Browser stream: http://%s:%s", args.stream_host, args.stream_port)
+            stream_sink = AsyncFrameSink(stream.publish, "stream", logger, latest_only=True)
         warmup_until = time.monotonic() + args.warmup
         while time.monotonic() < warmup_until:
             backend.detect(next(frame_iterator))
@@ -754,18 +825,23 @@ def run_host_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: P
             monitor.record_inference_time(latency_ms)
             monitor.sample_if_due(elapsed_s)
             annotated = annotate(frame, detections, model, run_logger.frames / elapsed_s if elapsed_s else 0)
-            recorder.write(annotated)
-            if stream:
-                stream.publish(annotated)
+            if recorder_sink:
+                recorder_sink.submit(annotated)
+            if stream_sink:
+                stream_sink.submit(annotated)
         elapsed_s = time.monotonic() - started_at
         monitor.sample_if_due(elapsed_s + monitor.interval_s)
         return run_logger.summary(elapsed_s, monitor.samples)
     finally:
         source.close()
+        if recorder_sink:
+            recorder_sink.close()
         recorder.close()
         monitor.close()
         run_logger.close()
         backend.close()
+        if stream_sink:
+            stream_sink.close()
         if stream:
             stream.close()
 
@@ -806,12 +882,18 @@ def run_imx_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: Pa
     monitor = SystemMonitor(output_dir / "system.csv")
     run_logger = RunLogger(output_dir, model, "imx")
     recorder = VideoRecorder(output_dir / "recording.mp4" if args.record else None, args.record_fps)
+    recorder_sink = (
+        AsyncFrameSink(recorder.write, "recording", logger, max_fps=args.record_fps)
+        if args.record else None
+    )
     stream = MjpegServer(args.stream_host, args.stream_port) if args.stream else None
-    if stream:
-        stream.start()
-        logger.info("Browser stream: http://%s:%s", args.stream_host, args.stream_port)
+    stream_sink = None
 
     try:
+        if stream:
+            stream.start()
+            logger.info("Browser stream: http://%s:%s", args.stream_host, args.stream_port)
+            stream_sink = AsyncFrameSink(stream.publish, "stream", logger, latest_only=True)
         with device as camera:
             frame_iterator = iter(camera)
             warmup_until = time.monotonic() + args.warmup
@@ -840,16 +922,21 @@ def run_imx_benchmark(args: argparse.Namespace, model: ModelSpec, output_dir: Pa
                 annotator.annotate_boxes(frame, tracked, labels=labels)
                 annotated = frame.image
                 cv2.putText(annotated, f"FPS: {frame.fps:.1f} DPS: {frame.dps:.1f}", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 0), 1)
-                recorder.write(annotated)
-                if stream:
-                    stream.publish(annotated)
+                if recorder_sink:
+                    recorder_sink.submit(annotated.copy())
+                if stream_sink:
+                    stream_sink.submit(annotated.copy())
             elapsed_s = time.monotonic() - started_at
             monitor.sample_if_due(elapsed_s + monitor.interval_s)
             return run_logger.summary(elapsed_s, monitor.samples)
     finally:
+        if recorder_sink:
+            recorder_sink.close()
         recorder.close()
         monitor.close()
         run_logger.close()
+        if stream_sink:
+            stream_sink.close()
         if stream:
             stream.close()
 
@@ -877,11 +964,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--camera-size", type=parse_size, default=(2000, 1500))
     parser.add_argument("--camera-fps", type=int, default=60, help="Requested capture rate for camera sources")
-    parser.add_argument("--ir-camera-device", default="/dev/video8", help="V4L2 device path for --source ir-camera")
+    parser.add_argument("--ir-camera-device", default="/dev/video0", help="V4L2 device path for --source ir-camera")
     parser.add_argument("--no-loop-source", action="store_false", dest="loop_source", help="Do not repeat file sources")
     parser.set_defaults(loop_source=True)
     parser.add_argument("--record", action="store_true", help="Write annotated recording.mp4")
-    parser.add_argument("--record-fps", type=float, default=16)
+    parser.add_argument("--record-fps", type=float, default=16, help="Maximum recording rate and MP4 playback rate")
     parser.add_argument("--stream", action="store_true", help="Publish annotated MJPEG stream")
     parser.add_argument("--stream-host", default="0.0.0.0")
     parser.add_argument("--stream-port", type=int, default=5000)

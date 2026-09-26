@@ -2,7 +2,7 @@ test on AI camera
 
 model 1
 640x640 yolo v8n
-python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source camera --stream --record
+python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source camera --stream --record --duration 10
 
 
 test model 2
@@ -12,9 +12,12 @@ test model 2
 
 test on IR camera
 
+check deviec
+v4l2-ctl --list-devices
+
 model 1
 640x640 yolo v8n
-python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source ai-camera --stream --record
+python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source ir-camera --stream --record
 
 
 ----------------------------------
