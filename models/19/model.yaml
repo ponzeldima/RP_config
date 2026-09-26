@@ -1,0 +1,15 @@
+name: 19
+display_name: My Custom YOLOv8n FPV
+classes:
+  - fpv
+  - bird
+input_size: [960, 960]
+confidence_threshold: 0.25
+nms_threshold: 0.45
+artifacts:
+  pt: model.pt
+  onnx: 17.onnx
+  openvino: 23/best.xml
+  imx: imx/packerOut.zip
+  imx_labels: imx/labels.txt
+  hailo: 27/best.hef

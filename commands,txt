@@ -1,12 +1,13 @@
 test on AI camera
 
-model 1
-640x640 yolo v8n
-python3 benchmark.py v8n_640_fpv_public_datasts_310826 --backend hailo --source camera --stream --record --duration 10
+model 28
+640x640 yolo v8m
+python3 benchmark.py 18 --backend hailo --source camera --stream --record --duration 60
 
 
-test model 2
-640x640 yolo v8n with public data
+model 27
+960x960 yolo v8n 
+python3 benchmark.py 19 --backend hailo --source camera --stream --record --duration 60
 
 ---------------------------------
 
